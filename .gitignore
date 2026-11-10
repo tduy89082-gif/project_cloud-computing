@@ -1,0 +1,16 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+
+# Local configuration and credentials
+.env
+.env.*
+.aws/
+*.pem
+*.key
+
+# Generated experiment artifacts
+reports/output/
+*.csv
+*.log

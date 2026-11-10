@@ -1,0 +1,107 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CO3141 optional AWS Batch EC2 compute environment, queue and worker job definition.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: co3141
+    AllowedPattern: '^[a-z0-9-]+$'
+  ImageUri:
+    Type: String
+    Description: Full ECR URI including immutable tag.
+  SubnetAId:
+    Type: AWS::EC2::Subnet::Id
+  SubnetBId:
+    Type: AWS::EC2::Subnet::Id
+  BatchSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+  InstanceProfileArn:
+    Type: String
+    Description: EC2 instance profile ARN with AmazonEC2ContainerServiceforEC2Role.
+  TaskExecutionRoleArn:
+    Type: String
+    Description: ECS task execution role ARN for image pull and awslogs.
+  LogGroupName:
+    Type: String
+
+Resources:
+  BatchComputeEnvironment:
+    Type: AWS::Batch::ComputeEnvironment
+    Properties:
+      ComputeEnvironmentName: !Sub '${ProjectName}-batch-ce'
+      Type: MANAGED
+      State: ENABLED
+      ComputeResources:
+        Type: EC2
+        AllocationStrategy: BEST_FIT_PROGRESSIVE
+        MinvCpus: 0
+        DesiredvCpus: 0
+        MaxvCpus: 2
+        InstanceTypes:
+          - t3.small
+        Subnets:
+          - !Ref SubnetAId
+          - !Ref SubnetBId
+        SecurityGroupIds:
+          - !Ref BatchSecurityGroupId
+        InstanceRole: !Ref InstanceProfileArn
+        Tags:
+          Project: CO3141
+          Team: 3buanhan
+          Environment: lab
+      Tags:
+        Project: CO3141
+        Team: 3buanhan
+
+  BatchJobQueue:
+    Type: AWS::Batch::JobQueue
+    Properties:
+      JobQueueName: !Sub '${ProjectName}-batch-queue'
+      State: ENABLED
+      Priority: 1
+      ComputeEnvironmentOrder:
+        - Order: 1
+          ComputeEnvironment: !Ref BatchComputeEnvironment
+      Tags:
+        Project: CO3141
+        Team: 3buanhan
+
+  BatchJobDefinition:
+    Type: AWS::Batch::JobDefinition
+    Properties:
+      JobDefinitionName: !Sub '${ProjectName}-worker-job'
+      Type: container
+      PlatformCapabilities:
+        - EC2
+      ContainerProperties:
+        Image: !Ref ImageUri
+        Command:
+          - python
+          - worker.py
+          - --seconds
+          - '30'
+        ExecutionRoleArn: !Ref TaskExecutionRoleArn
+        ResourceRequirements:
+          - Type: VCPU
+            Value: '1'
+          - Type: MEMORY
+            Value: '512'
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            awslogs-group: !Ref LogGroupName
+            awslogs-region: !Ref AWS::Region
+            awslogs-stream-prefix: batch
+      RetryStrategy:
+        Attempts: 1
+      Tags:
+        Project: CO3141
+        Team: 3buanhan
+
+Outputs:
+  ComputeEnvironmentArn:
+    Value: !Ref BatchComputeEnvironment
+  JobQueueArn:
+    Value: !Ref BatchJobQueue
+  JobDefinitionArn:
+    Value: !Ref BatchJobDefinition

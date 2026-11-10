@@ -1,0 +1,87 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CO3141 one-time EventBridge Scheduler schedule targeting an ECS worker task.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: co3141
+  ScheduleAt:
+    Type: String
+    Description: Future local time as YYYY-MM-DDTHH:MM:SS in ScheduleTimezone.
+    AllowedPattern: '^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}$'
+  ScheduleTimezone:
+    Type: String
+    Default: Asia/Ho_Chi_Minh
+  ClusterArn:
+    Type: String
+  CapacityProviderName:
+    Type: String
+  WorkerTaskDefinitionArn:
+    Type: String
+  TaskExecutionRoleArn:
+    Type: String
+
+Resources:
+  SchedulerExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-scheduler-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: RunOneWorkerTask
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ecs:RunTask
+                Resource: !Ref WorkerTaskDefinitionArn
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource: !Ref TaskExecutionRoleArn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: ecs-tasks.amazonaws.com
+      Tags:
+        - Key: Project
+          Value: CO3141
+        - Key: Team
+          Value: 3buanhan
+
+  OneTimeWorkerSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: !Sub '${ProjectName}-worker-once'
+      Description: One-time CO3141 worker scheduling demonstration.
+      State: ENABLED
+      ScheduleExpression: !Sub 'at(${ScheduleAt})'
+      ScheduleExpressionTimezone: !Ref ScheduleTimezone
+      FlexibleTimeWindow:
+        Mode: OFF
+      Target:
+        Arn: !Ref ClusterArn
+        RoleArn: !GetAtt SchedulerExecutionRole.Arn
+        EcsParameters:
+          TaskDefinitionArn: !Ref WorkerTaskDefinitionArn
+          TaskCount: 1
+          CapacityProviderStrategy:
+            - CapacityProvider: !Ref CapacityProviderName
+              Weight: 1
+        Input: !Sub |
+          {
+            "containerOverrides": [
+              {
+                "name": "worker",
+                "command": ["python", "worker.py", "--seconds", "15"]
+              }
+            ]
+          }
+
+Outputs:
+  ScheduleArn:
+    Value: !GetAtt OneTimeWorkerSchedule.Arn

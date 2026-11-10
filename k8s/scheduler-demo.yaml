@@ -1,0 +1,43 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: co3141
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: co3141-cpu
+  namespace: co3141
+  labels:
+    app: co3141-cpu
+spec:
+  replicas: 6
+  selector:
+    matchLabels:
+      app: co3141-cpu
+  template:
+    metadata:
+      labels:
+        app: co3141-cpu
+    spec:
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: co3141-cpu
+      containers:
+        - name: cpu-worker
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - while true; do dd if=/dev/zero of=/dev/null bs=64K count=16 2>/dev/null; done
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi

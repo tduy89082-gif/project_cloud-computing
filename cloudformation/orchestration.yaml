@@ -1,0 +1,339 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CO3141 idempotency Lambdas and Step Functions workflow for ECS worker tasks.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: co3141
+    AllowedPattern: '^[a-z0-9-]+$'
+  IdempotencyTableName:
+    Type: String
+  ClusterArn:
+    Type: String
+  CapacityProviderName:
+    Type: String
+  WorkerTaskDefinitionArn:
+    Type: String
+  TaskExecutionRoleArn:
+    Type: String
+
+Resources:
+  ClaimJobLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ClaimIdempotencyRecord
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                Resource: !Sub 'arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${IdempotencyTableName}'
+      Tags:
+        - Key: Project
+          Value: CO3141
+        - Key: Team
+          Value: 3buanhan
+
+  MarkJobLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: UpdateIdempotencyRecord
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:UpdateItem
+                Resource: !Sub 'arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${IdempotencyTableName}'
+      Tags:
+        - Key: Project
+          Value: CO3141
+        - Key: Team
+          Value: 3buanhan
+
+  ClaimJobFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-claim-job'
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt ClaimJobLambdaRole.Arn
+      Timeout: 10
+      MemorySize: 128
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref IdempotencyTableName
+      Code:
+        ZipFile: |
+          import os
+          from datetime import datetime, timezone
+          import boto3
+          from botocore.exceptions import ClientError
+
+          table = boto3.resource("dynamodb").Table(os.environ["TABLE_NAME"])
+
+          def handler(event, context):
+              job_id = str(event.get("jobId", "")).strip()
+              if not job_id:
+                  raise ValueError("Input must contain a non-empty jobId")
+              now = datetime.now(timezone.utc).isoformat()
+              try:
+                  table.put_item(
+                      Item={"idempotencyKey": job_id, "status": "IN_PROGRESS", "createdAt": now, "updatedAt": now},
+                      ConditionExpression="attribute_not_exists(idempotencyKey)",
+                  )
+                  return {**event, "duplicate": False, "status": "IN_PROGRESS"}
+              except ClientError as exc:
+                  if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+                      raise
+                  existing = table.get_item(Key={"idempotencyKey": job_id}, ConsistentRead=True).get("Item", {})
+                  return {**event, "duplicate": True, "status": existing.get("status", "UNKNOWN")}
+      Tags:
+        - Key: Project
+          Value: CO3141
+        - Key: Team
+          Value: 3buanhan
+
+  MarkJobFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-mark-job'
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt MarkJobLambdaRole.Arn
+      Timeout: 10
+      MemorySize: 128
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref IdempotencyTableName
+      Code:
+        ZipFile: |
+          import os
+          from datetime import datetime, timezone
+          import boto3
+
+          table = boto3.resource("dynamodb").Table(os.environ["TABLE_NAME"])
+
+          def handler(event, context):
+              job_id = str(event.get("jobId", "")).strip()
+              status = str(event.get("status", "")).strip().upper()
+              if not job_id or status not in {"SUCCEEDED", "FAILED"}:
+                  raise ValueError("Expected jobId and status SUCCEEDED or FAILED")
+              values = {":status": status, ":updated": datetime.now(timezone.utc).isoformat()}
+              update = "SET #s = :status, updatedAt = :updated"
+              names = {"#s": "status"}
+              if event.get("error"):
+                  values[":error"] = str(event["error"])[:1000]
+                  update += ", errorMessage = :error"
+              table.update_item(
+                  Key={"idempotencyKey": job_id},
+                  UpdateExpression=update,
+                  ExpressionAttributeNames=names,
+                  ExpressionAttributeValues=values,
+                  ConditionExpression="attribute_exists(idempotencyKey)",
+              )
+              return {"jobId": job_id, "status": status}
+      Tags:
+        - Key: Project
+          Value: CO3141
+        - Key: Team
+          Value: 3buanhan
+
+  StateMachineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeProjectLambdas
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !GetAtt ClaimJobFunction.Arn
+                  - !GetAtt MarkJobFunction.Arn
+        - PolicyName: RunAndMonitorEcsWorker
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecs:RunTask
+                Resource: !Ref WorkerTaskDefinitionArn
+              - Effect: Allow
+                Action:
+                  - ecs:StopTask
+                  - ecs:DescribeTasks
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - events:PutRule
+                  - events:PutTargets
+                  - events:DescribeRule
+                Resource: !Sub 'arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:rule/StepFunctionsGetEventsForECSTaskRule'
+              - Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource: !Ref TaskExecutionRoleArn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: ecs-tasks.amazonaws.com
+      Tags:
+        - Key: Project
+          Value: CO3141
+        - Key: Team
+          Value: 3buanhan
+
+  OrchestrationStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub '${ProjectName}-orchestration'
+      StateMachineType: STANDARD
+      RoleArn: !GetAtt StateMachineRole.Arn
+      DefinitionString: |
+        {
+          "Comment": "CO3141 workflow: claim idempotency key, run ECS worker, update status and catch failures.",
+          "StartAt": "ClaimJob",
+          "States": {
+            "ClaimJob": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${ClaimJobFunctionArn}",
+                "Payload.$": "$"
+              },
+              "OutputPath": "$.Payload",
+              "Next": "CheckDuplicate"
+            },
+            "CheckDuplicate": {
+              "Type": "Choice",
+              "Choices": [
+                {"Variable": "$.duplicate", "BooleanEquals": true, "Next": "AlreadyProcessed"}
+              ],
+              "Default": "RunWorker"
+            },
+            "AlreadyProcessed": {
+              "Type": "Pass",
+              "Result": {"message": "The idempotency key already exists; worker was not started."},
+              "End": true
+            },
+            "RunWorker": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::ecs:runTask.sync",
+              "Parameters": {
+                "Cluster": "${EcsClusterArn}",
+                "TaskDefinition": "${WorkerTaskDefinitionArn}",
+                "CapacityProviderStrategy": [
+                  {"CapacityProvider": "${EcsCapacityProviderName}", "Weight": 1}
+                ],
+                "Overrides": {
+                  "ContainerOverrides": [
+                    {
+                      "Name": "worker",
+                      "Command": ["python", "worker.py", "--seconds", "20"],
+                      "Environment": [
+                        {"Name": "JOB_ID", "Value.$": "$.jobId"},
+                        {"Name": "FAIL_MODE", "Value.$": "$.fail"}
+                      ]
+                    }
+                  ]
+                }
+              },
+              "ResultPath": "$.workerResult",
+              "Retry": [
+                {
+                  "ErrorEquals": ["AmazonECS.Unknown", "States.TaskFailed"],
+                  "IntervalSeconds": 2,
+                  "MaxAttempts": 2,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "ResultPath": "$.workerError",
+                  "Next": "MarkFailed"
+                }
+              ],
+              "Next": "MarkSucceeded"
+            },
+            "MarkSucceeded": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${MarkJobFunctionArn}",
+                "Payload": {"jobId.$": "$.jobId", "status": "SUCCEEDED"}
+              },
+              "OutputPath": "$.Payload",
+              "End": true
+            },
+            "MarkFailed": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${MarkJobFunctionArn}",
+                "Payload": {
+                  "jobId.$": "$.jobId",
+                  "status": "FAILED",
+                  "error.$": "$.workerError.Cause"
+                }
+              },
+              "OutputPath": "$.Payload",
+              "Next": "WorkflowFailed"
+            },
+            "WorkflowFailed": {
+              "Type": "Fail",
+              "Error": "WorkerFailed",
+              "Cause": "The ECS worker failed after the configured retries."
+            }
+          }
+        }
+      DefinitionSubstitutions:
+        ClaimJobFunctionArn: !GetAtt ClaimJobFunction.Arn
+        MarkJobFunctionArn: !GetAtt MarkJobFunction.Arn
+        EcsClusterArn: !Ref ClusterArn
+        EcsCapacityProviderName: !Ref CapacityProviderName
+        WorkerTaskDefinitionArn: !Ref WorkerTaskDefinitionArn
+      Tags:
+        - Key: Project
+          Value: CO3141
+        - Key: Team
+          Value: 3buanhan
+
+Outputs:
+  ClaimJobFunctionArn:
+    Value: !GetAtt ClaimJobFunction.Arn
+  MarkJobFunctionArn:
+    Value: !GetAtt MarkJobFunction.Arn
+  StateMachineArn:
+    Value: !Ref OrchestrationStateMachine

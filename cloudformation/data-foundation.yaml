@@ -1,0 +1,94 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CO3141 student project data foundation (ECR, S3, DynamoDB, CloudWatch Logs).
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: co3141
+    AllowedPattern: '^[a-z0-9-]+$'
+    Description: Lowercase project prefix.
+
+Resources:
+  WorkloadRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub '${ProjectName}-workload'
+      EmptyOnDelete: true
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      ImageTagMutability: IMMUTABLE
+      LifecyclePolicy:
+        LifecyclePolicyText: !Sub |
+          {"rules":[{"rulePriority":1,"description":"Keep the newest 10 images","selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":10},"action":{"type":"expire"}}]}
+      Tags:
+        - Key: Project
+          Value: CO3141
+        - Key: Team
+          Value: 3buanhan
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  ResultsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      Tags:
+        - Key: Project
+          Value: CO3141
+        - Key: Team
+          Value: 3buanhan
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  IdempotencyTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${ProjectName}-idempotency'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: idempotencyKey
+          AttributeType: S
+      KeySchema:
+        - AttributeName: idempotencyKey
+          KeyType: HASH
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - Key: Project
+          Value: CO3141
+        - Key: Team
+          Value: 3buanhan
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  WorkloadLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/co3141/${ProjectName}/workload'
+      RetentionInDays: 7
+      Tags:
+        - Key: Project
+          Value: CO3141
+        - Key: Team
+          Value: 3buanhan
+
+Outputs:
+  RepositoryUri:
+    Description: URI of the shared workload ECR repository.
+    Value: !GetAtt WorkloadRepository.RepositoryUri
+  RepositoryName:
+    Value: !Ref WorkloadRepository
+  ResultsBucketName:
+    Value: !Ref ResultsBucket
+  IdempotencyTableName:
+    Value: !Ref IdempotencyTable
+  WorkloadLogGroupName:
+    Value: !Ref WorkloadLogGroup

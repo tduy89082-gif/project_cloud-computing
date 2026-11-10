@@ -1,0 +1,107 @@
+{
+  "Comment": "CO3141 workflow: idempotency check, run ECS worker, update status, and catch failures.",
+  "StartAt": "ClaimJob",
+  "States": {
+    "ClaimJob": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "<CLAIM_JOB_LAMBDA_ARN>",
+        "Payload.$": "$"
+      },
+      "OutputPath": "$.Payload",
+      "Next": "CheckDuplicate"
+    },
+    "CheckDuplicate": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.duplicate",
+          "BooleanEquals": true,
+          "Next": "AlreadyProcessed"
+        }
+      ],
+      "Default": "RunWorker"
+    },
+    "AlreadyProcessed": {
+      "Type": "Pass",
+      "Result": {"message": "The idempotency key already exists; worker was not started."},
+      "End": true
+    },
+    "RunWorker": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::ecs:runTask.sync",
+      "Parameters": {
+        "Cluster": "<ECS_CLUSTER_ARN>",
+        "TaskDefinition": "<WORKER_TASK_DEFINITION_ARN>",
+        "CapacityProviderStrategy": [
+          {
+            "CapacityProvider": "<ECS_CAPACITY_PROVIDER_NAME>",
+            "Weight": 1
+          }
+        ],
+        "Overrides": {
+          "ContainerOverrides": [
+            {
+              "Name": "worker",
+              "Command": ["python", "worker.py", "--seconds", "20"],
+              "Environment": [
+                {"Name": "JOB_ID", "Value.$": "$.jobId"},
+                {"Name": "FAIL_MODE", "Value.$": "$.fail"}
+              ]
+            }
+          ]
+        }
+      },
+      "ResultPath": "$.workerResult",
+      "Retry": [
+        {
+          "ErrorEquals": ["AmazonECS.Unknown", "States.TaskFailed"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.workerError",
+          "Next": "MarkFailed"
+        }
+      ],
+      "Next": "MarkSucceeded"
+    },
+    "MarkSucceeded": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "<MARK_JOB_LAMBDA_ARN>",
+        "Payload": {
+          "jobId.$": "$.jobId",
+          "status": "SUCCEEDED"
+        }
+      },
+      "OutputPath": "$.Payload",
+      "End": true
+    },
+    "MarkFailed": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "<MARK_JOB_LAMBDA_ARN>",
+        "Payload": {
+          "jobId.$": "$.jobId",
+          "status": "FAILED",
+          "error.$": "$.workerError.Cause"
+        }
+      },
+      "OutputPath": "$.Payload",
+      "Next": "WorkflowFailed"
+    },
+    "WorkflowFailed": {
+      "Type": "Fail",
+      "Error": "WorkerFailed",
+      "Cause": "The ECS worker failed after the configured retries."
+    }
+  }
+}

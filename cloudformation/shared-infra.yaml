@@ -1,0 +1,378 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CO3141 shared network, ECS on EC2 capacity, and public ALB for a short student lab.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: co3141
+    AllowedPattern: '^[a-z0-9-]+$'
+  AllowedIngressCidr:
+    Type: String
+    Description: Your team's current public IPv4 CIDR, preferably x.x.x.x/32. Do not leave 0.0.0.0/0 for the lab.
+  InstanceType:
+    Type: String
+    Default: t3.small
+    Description: Check current regional pricing and account credits before deployment.
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.31.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-vpc'
+        - Key: Project
+          Value: CO3141
+        - Key: Team
+          Value: 3buanhan
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Project
+          Value: CO3141
+        - Key: Team
+          Value: 3buanhan
+
+  AttachInternetGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.31.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-public-a'
+        - Key: Project
+          Value: CO3141
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.31.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-public-b'
+        - Key: Project
+          Value: CO3141
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-public-rt'
+        - Key: Project
+          Value: CO3141
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachInternetGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetARouteAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetBRouteAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref PublicRouteTable
+
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP from the team's public IP for the CO3141 demo.
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: !Ref AllowedIngressCidr
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-alb-sg'
+        - Key: Project
+          Value: CO3141
+
+  EcsInstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow dynamic ECS bridge host ports only from the ALB.
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-ecs-instance-sg'
+        - Key: Project
+          Value: CO3141
+
+  EcsDynamicPortIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt EcsInstanceSecurityGroup.GroupId
+      IpProtocol: tcp
+      FromPort: 32768
+      ToPort: 61000
+      SourceSecurityGroupId: !GetAtt AlbSecurityGroup.GroupId
+
+  BatchSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Outbound-only security group for short-lived AWS Batch workers.
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-batch-sg'
+        - Key: Project
+          Value: CO3141
+        - Key: Team
+          Value: 3buanhan
+
+  EcsInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-ecs-instance-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+      Tags:
+        - Key: Project
+          Value: CO3141
+        - Key: Team
+          Value: 3buanhan
+
+  EcsInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub '${ProjectName}-ecs-instance-profile'
+      Roles:
+        - !Ref EcsInstanceRole
+
+  EcsTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-ecs-task-execution-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Tags:
+        - Key: Project
+          Value: CO3141
+        - Key: Team
+          Value: 3buanhan
+
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub '${ProjectName}-cluster'
+      Tags:
+        - Key: Project
+          Value: CO3141
+        - Key: Team
+          Value: 3buanhan
+
+  EcsLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub '${ProjectName}-ecs-lt'
+      LaunchTemplateData:
+        ImageId: '{{resolve:ssm:/aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/image_id}}'
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile:
+          Name: !Ref EcsInstanceProfile
+        NetworkInterfaces:
+          - DeviceIndex: 0
+            AssociatePublicIpAddress: true
+            DeleteOnTermination: true
+            Groups:
+              - !GetAtt EcsInstanceSecurityGroup.GroupId
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: 20
+              VolumeType: gp3
+              DeleteOnTermination: true
+              Encrypted: true
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            echo ECS_CLUSTER=${EcsCluster} >> /etc/ecs/ecs.config
+            echo ECS_ENABLE_CONTAINER_METADATA=true >> /etc/ecs/ecs.config
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Project
+                Value: CO3141
+              - Key: Team
+                Value: 3buanhan
+              - Key: Environment
+                Value: lab
+          - ResourceType: volume
+            Tags:
+              - Key: Project
+                Value: CO3141
+              - Key: Team
+                Value: 3buanhan
+              - Key: Environment
+                Value: lab
+
+  EcsAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub '${ProjectName}-ecs-asg'
+      MinSize: '1'
+      MaxSize: '2'
+      DesiredCapacity: '1'
+      VPCZoneIdentifier:
+        - !Ref PublicSubnetA
+        - !Ref PublicSubnetB
+      LaunchTemplate:
+        LaunchTemplateId: !Ref EcsLaunchTemplate
+        Version: !GetAtt EcsLaunchTemplate.LatestVersionNumber
+      Tags:
+        - Key: Project
+          Value: CO3141
+          PropagateAtLaunch: true
+        - Key: Team
+          Value: 3buanhan
+          PropagateAtLaunch: true
+        - Key: Environment
+          Value: lab
+          PropagateAtLaunch: true
+
+  EcsCapacityProvider:
+    Type: AWS::ECS::CapacityProvider
+    Properties:
+      Name: !Sub '${ProjectName}-ec2-capacity'
+      AutoScalingGroupProvider:
+        AutoScalingGroupArn: !Ref EcsAutoScalingGroup
+        ManagedScaling:
+          Status: ENABLED
+          TargetCapacity: 80
+          MinimumScalingStepSize: 1
+          MaximumScalingStepSize: 2
+          InstanceWarmupPeriod: 300
+        ManagedTerminationProtection: DISABLED
+      Tags:
+        - Key: Project
+          Value: CO3141
+
+  ClusterCapacityProviderAssociation:
+    Type: AWS::ECS::ClusterCapacityProviderAssociations
+    Properties:
+      Cluster: !Ref EcsCluster
+      CapacityProviders:
+        - !Ref EcsCapacityProvider
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: !Ref EcsCapacityProvider
+          Weight: 1
+          Base: 1
+
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub '${ProjectName}-alb'
+      Scheme: internet-facing
+      Type: application
+      IpAddressType: ipv4
+      SecurityGroups:
+        - !GetAtt AlbSecurityGroup.GroupId
+      Subnets:
+        - !Ref PublicSubnetA
+        - !Ref PublicSubnetB
+      Tags:
+        - Key: Project
+          Value: CO3141
+        - Key: Team
+          Value: 3buanhan
+
+  ApiTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub '${ProjectName}-api-tg'
+      VpcId: !Ref VPC
+      TargetType: instance
+      Protocol: HTTP
+      Port: 80
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /health
+      Matcher:
+        HttpCode: '200'
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      Tags:
+        - Key: Project
+          Value: CO3141
+
+  HttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ApiTargetGroup
+
+Outputs:
+  VpcId:
+    Value: !Ref VPC
+  PublicSubnetAId:
+    Value: !Ref PublicSubnetA
+  PublicSubnetBId:
+    Value: !Ref PublicSubnetB
+  EcsClusterName:
+    Value: !Ref EcsCluster
+  EcsClusterArn:
+    Value: !GetAtt EcsCluster.Arn
+  EcsCapacityProviderName:
+    Value: !Ref EcsCapacityProvider
+  EcsAutoScalingGroupName:
+    Value: !Ref EcsAutoScalingGroup
+  EcsTaskExecutionRoleArn:
+    Value: !GetAtt EcsTaskExecutionRole.Arn
+  EcsInstanceProfileArn:
+    Value: !GetAtt EcsInstanceProfile.Arn
+  BatchSecurityGroupId:
+    Value: !GetAtt BatchSecurityGroup.GroupId
+  AlbDnsName:
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+  ApiTargetGroupArn:
+    Value: !Ref ApiTargetGroup
+  AllowedIngressCidr:
+    Value: !Ref AllowedIngressCidr
