@@ -103,7 +103,7 @@ Resources:
   AlbSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: Allow HTTP from the team's public IP for the CO3141 demo.
+      GroupDescription: Allow HTTP from team public IP for the CO3141 demo.
       VpcId: !Ref VPC
       SecurityGroupIngress:
         - IpProtocol: tcp
@@ -222,7 +222,7 @@ Resources:
         BlockDeviceMappings:
           - DeviceName: /dev/xvda
             Ebs:
-              VolumeSize: 20
+              VolumeSize: 30
               VolumeType: gp3
               DeleteOnTermination: true
               Encrypted: true
